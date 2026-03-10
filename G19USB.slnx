@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/G19USB.BasicSample/G19USB.BasicSample.csproj" />
+  </Folder>
+  <Project Path="G19USB.Tests/G19USB.Tests.csproj" />
+  <Project Path="G19USB/G19USB.csproj" />
+</Solution>

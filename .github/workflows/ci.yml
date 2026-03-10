@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # needed for MinVer to walk commit history
+          fetch-tags: true  # required: actions/checkout@v4 does not fetch tags by default
+      - name: Fetch tags (MinVer workaround)
+        run: git fetch --tags --force  # libgit2sharp needs refs/tags/* to be present locally
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+      - name: Restore
+        run: dotnet restore
+      - name: Build
+        run: dotnet build --no-restore -c Release
+      - name: Test
+        run: dotnet test --no-build -c Release -v normal
+      - name: Pack (on tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          dotnet pack G19USB/G19USB.csproj -c Release -o ./artifacts -p:MinVerSkip=true -p:Version=$v -p:PackageVersion=$v
+      - name: Upload NuGet artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: ./artifacts/*.nupkg

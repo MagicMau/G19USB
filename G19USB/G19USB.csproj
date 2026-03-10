@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>Library</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImportWindowsDesktopTargets>true</ImportWindowsDesktopTargets>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <!-- NuGet package metadata -->
+    <PackageId>G19USB</PackageId>
+    <Authors>MagicMau</Authors>
+    <Description>A .NET library for controlling the Logitech G19/G19s keyboard LCD display and G/M/L-keys over direct USB (libusbK driver). Supports 320×240 colour LCD rendering, key event monitoring, M-key LEDs, and backlight control.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/MagicMau/G19USB</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MagicMau/G19USB</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>logitech;g19;g19s;lcd;keyboard;usb;libusbk;hid</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- Only active on CI where a git remote is present; suppresses "no remote" warnings locally -->
+    <PublishRepositoryUrl Condition="'$(GITHUB_ACTIONS)' == 'true'">true</PublishRepositoryUrl>
+    <EmbedUntrackedSources Condition="'$(GITHUB_ACTIONS)' == 'true'">true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LibUsbDotNet" Version="2.2.75" />
+    <PackageReference Include="MinVer" Version="6.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!-- Only load SourceLink on CI (GITHUB_ACTIONS=true); avoids "no remote" warnings in local builds -->
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" Condition="'$(GITHUB_ACTIONS)' == 'true'">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>
