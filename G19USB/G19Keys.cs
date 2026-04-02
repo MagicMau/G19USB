@@ -2,7 +2,7 @@ using System;
 
 namespace G19USB
 {
-    /// <summary>Active macro bank selected by M1/M2/M3.</summary>
+    /// <summary>Logical macro bank selected by the M1, M2, or M3 key.</summary>
     public enum GKeyBank
     {
         /// <summary>No M-key bank selected (default).</summary>
@@ -16,9 +16,13 @@ namespace G19USB
     }
 
     /// <summary>
-    /// The special keys of the G19 keyboard.
+    /// Bit flags for the Logitech-specific G19 special keys.
     /// Based on libg19: https://github.com/jgeboski/libg19
     /// </summary>
+    /// <remarks>
+    /// These values are used by key events and the M-key LED helpers. They are not standard keyboard scan codes or
+    /// Windows virtual-key values.
+    /// </remarks>
     [Flags]
     public enum G19Keys : uint
     {
@@ -76,7 +80,7 @@ namespace G19USB
         M2 = 1 << 21,
         /// <summary>M3 macro bank key.</summary>
         M3 = 1 << 22,
-        /// <summary>MR (Macro Record) bank key.</summary>
-        MR = 1 << 23  // MR (Macro Record) key
+        /// <summary>MR (macro record) key.</summary>
+        MR = 1 << 23
     }
 }

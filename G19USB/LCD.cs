@@ -10,9 +10,13 @@ using System.Threading.Tasks;
 namespace G19USB
 {
     /// <summary>
-    /// G19 LCD Display interface for updating the 320x240 color LCD screen.
+    /// Low-level LCD and backlight interface for the G19 display transport.
     /// Based on libg19: https://github.com/jgeboski/libg19
     /// </summary>
+    /// <remarks>
+    /// This type manages USB interface 0 and the LCD bulk-out endpoint. Use <see cref="G19Device"/> when the LCD and
+    /// keyboard should share one USB handle; use <see cref="LCD"/> directly when you only need the screen and backlight.
+    /// </remarks>
     public class LCD : IDisposable
     {
         private UsbDevice? _usbDevice;
@@ -35,20 +39,24 @@ namespace G19USB
         private bool _disposed;
 
         /// <summary>
-        /// Gets whether the LCD device is available and connected
+        /// Gets whether the LCD endpoint has been opened successfully.
         /// </summary>
+        /// <remarks>
+        /// This flag is updated when the endpoint writer is created or torn down. It does not actively probe USB
+        /// connectivity, so it may remain <see langword="true"/> until a later operation notices a failure.
+        /// </remarks>
         public bool IsAvailable { get; private set; }
 
         /// <summary>
-        /// Create new instance with the default G19 VID/PID
+        /// Creates an LCD helper that targets the default Logitech G19 vendor and product IDs.
         /// </summary>
         public LCD() : this(G19Constants.VendorId, G19Constants.ProductId) { }
 
         /// <summary>
-        /// Create a new instance of the LCD class
+        /// Creates an LCD helper for the specified USB vendor and product IDs.
         /// </summary>
-        /// <param name="vendorId">Device vendor ID</param>
-        /// <param name="productId">Device product ID</param>
+        /// <param name="vendorId">USB vendor ID to probe.</param>
+        /// <param name="productId">USB product ID to probe.</param>
         public LCD(int vendorId, int productId)
         {
             _usbFinder = new UsbDeviceFinder(vendorId, productId);
@@ -64,8 +72,16 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Open connection to the device
+        /// Opens USB interface 0 and the LCD bulk-out endpoint.
         /// </summary>
+        /// <remarks>
+        /// Calling this method more than once is safe; subsequent calls return immediately while the LCD is already open.
+        /// If the device is visible to LibUsbDotNet but cannot be opened, the thrown <see cref="Exception"/> typically
+        /// indicates that another application owns it or that libusbK is not installed on the composite parent device for
+        /// the LCD path.
+        /// </remarks>
+        /// <exception cref="ObjectDisposedException">This instance has already been disposed.</exception>
+        /// <exception cref="Exception">The device or LCD endpoint could not be opened.</exception>
         public void OpenDevice()
         {
             ThrowIfDisposed();
@@ -92,8 +108,8 @@ namespace G19USB
                 {
                     throw new Exception("G19 device found but could not be opened. This may happen if:\n" +
                         "1. The device is already in use by another application\n" +
-                        "2. The WinUSB driver is not installed correctly on ALL interfaces\n" +
-                        "3. You need to reinstall the WinUSB driver using Zadig on the base device (not just interface 0)");
+                        "2. The libusbK driver is not installed correctly on the composite parent device\n" +
+                        "3. You need to reinstall the libusbK driver using Zadig on the base device (not just interface 0)");
                 }
                 else
                 {
@@ -159,8 +175,13 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Close the connection to the device
+        /// Closes the LCD endpoint and, when this instance owns the USB handle, releases interface 0 and closes the device.
         /// </summary>
+        /// <remarks>
+        /// If this <see cref="LCD"/> instance was initialized from <see cref="G19Device"/>, calling this method also
+        /// closes the shared USB handle and therefore affects the keyboard side. Prefer <see cref="G19Device.CloseDevice"/>
+        /// when you obtained the helper from the combined wrapper.
+        /// </remarks>
         public void CloseDevice()
         {
             _writer?.Dispose();
@@ -185,13 +206,22 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Update the LCD screen with bitmap data.
-        /// Accepts either:
-        /// - raw RGB565 pixel data only (2 bytes per pixel, 320x240 = 153600 bytes), or
-        /// - a full buffer including the 512-byte header followed by RGB565 data (LcdFullSize).
-        /// If a full buffer is provided we write it directly to the endpoint to avoid an extra copy.
+        /// Writes one LCD frame and waits for the queued USB transfer to finish.
         /// </summary>
-        /// <param name="lcdData">The pixel data or full LCD buffer.</param>
+        /// <param name="lcdData">
+        /// Either <see cref="G19Constants.LcdDataSize"/> bytes of raw RGB565 pixel payload, such as the output of
+        /// <see cref="G19Helpers.ConvertBitmapToRGB565(System.Drawing.Bitmap)"/>, or
+        /// <see cref="G19Constants.LcdFullSize"/> bytes containing <see cref="G19Constants.LcdHeader"/> followed by
+        /// that payload.
+        /// </param>
+        /// <remarks>
+        /// This overload validates only the buffer length. Callers are responsible for supplying the device's RGB565 byte
+        /// order and frame layout.
+        /// </remarks>
+        /// <exception cref="ArgumentNullException"><paramref name="lcdData"/> is <see langword="null"/>.</exception>
+        /// <exception cref="ArgumentException"><paramref name="lcdData"/> does not match a supported frame size.</exception>
+        /// <exception cref="InvalidOperationException">The LCD endpoint is not open.</exception>
+        /// <exception cref="ObjectDisposedException">This instance has already been disposed.</exception>
         public void UpdateScreen(byte[] lcdData)
         {
             if (lcdData == null)
@@ -203,9 +233,19 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Update the LCD screen with raw RGB565 pixel data provided as a span.
+        /// Writes one LCD frame from raw RGB565 pixel data.
         /// </summary>
-        /// <param name="lcdData">Raw pixel data (320x240 RGB565).</param>
+        /// <param name="lcdData">
+        /// Exactly <see cref="G19Constants.LcdDataSize"/> bytes of raw RGB565 pixel payload without the 512-byte header.
+        /// </param>
+        /// <remarks>
+        /// The span is copied into an internal full-frame buffer before the call returns. Use
+        /// <see cref="UpdateScreenAsync(ReadOnlyMemory{byte}, bool)"/> with <paramref name="lcdData"/> plus a header when
+        /// you already have a complete frame.
+        /// </remarks>
+        /// <exception cref="ArgumentException"><paramref name="lcdData"/> does not contain exactly one raw frame.</exception>
+        /// <exception cref="InvalidOperationException">The LCD endpoint is not open.</exception>
+        /// <exception cref="ObjectDisposedException">This instance has already been disposed.</exception>
         public void UpdateScreen(ReadOnlySpan<byte> lcdData)
         {
             ThrowIfDisposed();
@@ -224,10 +264,25 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Asynchronously update the LCD screen with either raw pixel data or a full header+payload buffer.
+        /// Queues one LCD frame and returns a task that completes when the USB write finishes.
         /// </summary>
-        /// <param name="lcdData">Pixel data or full LCD buffer.</param>
-        /// <param name="includesHeader">Set to true when <paramref name="lcdData"/> already includes the LCD header.</param>
+        /// <param name="lcdData">Raw RGB565 pixel payload or a complete header-plus-pixel frame, depending on <paramref name="includesHeader"/>.</param>
+        /// <param name="includesHeader">
+        /// <see langword="true"/> when <paramref name="lcdData"/> already includes <see cref="G19Constants.LcdHeader"/>;
+        /// otherwise <see langword="false"/>.
+        /// </param>
+        /// <remarks>
+        /// Writes are serialized on an internal worker. When <paramref name="includesHeader"/> is
+        /// <see langword="false"/>, <paramref name="lcdData"/> must contain exactly
+        /// <see cref="G19Constants.LcdDataSize"/> bytes and the payload is copied before this method returns. When it is
+        /// <see langword="true"/>, <paramref name="lcdData"/> must contain exactly
+        /// <see cref="G19Constants.LcdFullSize"/> bytes. Array-backed memory of that exact size may be written directly,
+        /// so keep it alive and unchanged until the returned task completes.
+        /// </remarks>
+        /// <exception cref="ArgumentNullException"><paramref name="lcdData"/> is empty.</exception>
+        /// <exception cref="ArgumentException"><paramref name="lcdData"/> does not match the expected frame size.</exception>
+        /// <exception cref="InvalidOperationException">The LCD endpoint is not open.</exception>
+        /// <exception cref="ObjectDisposedException">This instance has already been disposed.</exception>
         public ValueTask UpdateScreenAsync(ReadOnlyMemory<byte> lcdData, bool includesHeader = false)
         {
             ThrowIfDisposed();
@@ -338,9 +393,16 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Set the LCD brightness level
+        /// Sets the LCD brightness.
         /// </summary>
-        /// <param name="brightness">Brightness level (0-100)</param>
+        /// <param name="brightness">Brightness level from 0 to 100 inclusive.</param>
+        /// <remarks>
+        /// The control transfer retries by reconnecting the device if the write fails, which is useful after
+        /// suspend/resume or similar USB interruptions.
+        /// </remarks>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="brightness"/> is greater than 100.</exception>
+        /// <exception cref="InvalidOperationException">The LCD endpoint is not open.</exception>
+        /// <exception cref="ObjectDisposedException">This instance has already been disposed.</exception>
         public void SetBrightness(byte brightness)
         {
             ThrowIfDisposed();
@@ -392,11 +454,18 @@ namespace G19USB
         private const double GammaB = 2.2;
 
         /// <summary>
-        /// Set the keyboard backlight color
+        /// Sets the keyboard backlight colour.
         /// </summary>
-        /// <param name="red">Red component (0-255)</param>
-        /// <param name="green">Green component (0-255)</param>
-        /// <param name="blue">Blue component (0-255)</param>
+        /// <param name="red">Red channel value from 0 to 255.</param>
+        /// <param name="green">Green channel value from 0 to 255.</param>
+        /// <param name="blue">Blue channel value from 0 to 255.</param>
+        /// <remarks>
+        /// Before sending the control transfer, the implementation remaps some near-white colours to compensate for the
+        /// hardware backlight. When green is at least 230 and red and blue are both within 70 of green, red and blue are
+        /// forced to 150 so the result appears whiter on the device. Primary colours are sent unchanged.
+        /// </remarks>
+        /// <exception cref="InvalidOperationException">The LCD endpoint is not open.</exception>
+        /// <exception cref="ObjectDisposedException">This instance has already been disposed.</exception>
         public void SetBacklightColor(byte red, byte green, byte blue)
         {
             ThrowIfDisposed();
@@ -659,7 +728,7 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Dispose of resources
+        /// Stops the internal write worker and closes the LCD transport.
         /// </summary>
         public void Dispose()
         {

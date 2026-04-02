@@ -1,7 +1,7 @@
 namespace G19USB
 {
     /// <summary>
-    /// Constants for the G19 keyboard device
+    /// USB and protocol constants used by the G19 helpers.
     /// Based on libg19: https://github.com/jgeboski/libg19
     /// </summary>
     public static class G19Constants
@@ -15,11 +15,11 @@ namespace G19USB
         public const int LcdWidth = 320;
         /// <summary>LCD screen height in pixels.</summary>
         public const int LcdHeight = 240;
-        /// <summary>Size of the LCD frame header, in bytes.</summary>
+        /// <summary>Size of the fixed LCD protocol header that precedes every full frame, in bytes.</summary>
         public const int LcdHeaderSize = 512;
-        /// <summary>Size of one full RGB565 pixel payload (width × height × 2 bytes).</summary>
+        /// <summary>Size of one raw RGB565 pixel payload (width x height x 2 bytes) without the header.</summary>
         public const int LcdDataSize = LcdWidth * LcdHeight * 2;
-        /// <summary>Total size of one LCD frame including the 512-byte header.</summary>
+        /// <summary>Total size of one full LCD frame including the 512-byte header.</summary>
         public const int LcdFullSize = LcdHeaderSize + LcdDataSize;
 
         /// <summary>Bulk-OUT endpoint address for LCD data.</summary>
@@ -73,7 +73,10 @@ namespace G19USB
         /// <summary>Timeout for key interrupt-read transfers, in milliseconds.</summary>
         public const int KeyReadTimeout = 100;
 
-        /// <summary>512-byte LCD frame header required by the G19 display protocol (from libg19-data.c).</summary>
+        /// <summary>
+        /// 512-byte LCD frame header required by the G19 display protocol (from libg19-data.c).
+        /// <see cref="LCD.UpdateScreen(byte[])"/> prepends this header automatically when you supply only raw pixel payload.
+        /// </summary>
         public static readonly byte[] LcdHeader = new byte[LcdHeaderSize]
         {
             0x10, 0x0F, 0x00, 0x58, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x01, 0xEF, 0x00, 0x0F,

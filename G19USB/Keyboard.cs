@@ -7,9 +7,14 @@ using System.Threading.Tasks;
 namespace G19USB
 {
     /// <summary>
-    /// G19 Keyboard interface for reading G-keys, M-keys, and L-keys (LCD navigation).
+    /// Low-level keyboard interface for the G19 special keys and M-key LEDs.
     /// Based on libg19: https://github.com/jgeboski/libg19
     /// </summary>
+    /// <remarks>
+    /// This type manages USB interface 1, which exposes one interrupt endpoint for the LCD navigation keys and one
+    /// interrupt endpoint for the G and M keys. Use <see cref="G19Device"/> when the keyboard should share a USB handle
+    /// with the LCD.
+    /// </remarks>
     public class Keyboard : IDisposable
     {
         private UsbDevice? _usbDevice;
@@ -38,43 +43,70 @@ namespace G19USB
         // but arrive in separate buffers from different endpoints
 
         /// <summary>
-        /// Gets whether the keyboard device is available and connected
+        /// Gets whether both keyboard endpoint readers have been opened successfully.
         /// </summary>
+        /// <remarks>
+        /// This flag reflects endpoint initialization, not live device health. It may remain
+        /// <see langword="true"/> until a later operation tears the endpoints down.
+        /// </remarks>
         public bool IsAvailable { get; private set; }
 
         /// <summary>
-        /// Gets whether key monitoring is currently active
+        /// Gets whether monitoring has been requested and not yet stopped.
         /// </summary>
+        /// <remarks>
+        /// The value is set when <see cref="StartMonitoring"/> queues the polling tasks and cleared by
+        /// <see cref="StopMonitoring"/>. It is not reset automatically if a polling task exits early because of an
+        /// endpoint error or device removal.
+        /// </remarks>
         public bool IsMonitoring { get; private set; }
 
         /// <summary>
-        /// Event fired when keys are pressed or released
+        /// Raised when the decoded special-key flags change on either keyboard endpoint.
         /// </summary>
+        /// <remarks>
+        /// <see cref="G19KeyEventArgs.Keys"/> contains the flag set from the report that triggered the change. Because
+        /// L-key reports and G/M-key reports arrive on separate endpoints, treat the value as the latest decoded state for
+        /// that path rather than as a perfectly synchronized whole-device snapshot. Handlers run on the background polling
+        /// tasks started by <see cref="StartMonitoring"/>, not on a UI thread.
+        /// </remarks>
         public event EventHandler<G19KeyEventArgs>? KeysChanged;
 
         /// <summary>
-        /// Event fired for each raw G-key endpoint buffer read (for diagnostics)
+        /// Raised for raw G/M-key endpoint buffers in DEBUG builds.
         /// </summary>
+        /// <remarks>
+        /// The current implementation only raises this event inside <c>#if DEBUG</c>. The supplied
+        /// <see cref="G19GKeyBufferEventArgs.Buffer"/> array is not cloned, so copy the first
+        /// <see cref="G19GKeyBufferEventArgs.BytesRead"/> bytes if you need to keep them after the event handler returns.
+        /// </remarks>
         public event EventHandler<G19GKeyBufferEventArgs>? GKeyBufferReceived;
 
         /// <summary>
-        /// Create new instance with the default G19 VID/PID
+        /// Creates a keyboard helper that targets the default Logitech G19 vendor and product IDs.
         /// </summary>
         public Keyboard() : this(G19Constants.VendorId, G19Constants.ProductId) { }
 
         /// <summary>
-        /// Create a new instance of the Keyboard class
+        /// Creates a keyboard helper for the specified USB vendor and product IDs.
         /// </summary>
-        /// <param name="vendorId">Device vendor ID</param>
-        /// <param name="productId">Device product ID</param>
+        /// <param name="vendorId">USB vendor ID to probe.</param>
+        /// <param name="productId">USB product ID to probe.</param>
         public Keyboard(int vendorId, int productId)
         {
             _usbFinder = new UsbDeviceFinder(vendorId, productId);
         }
 
         /// <summary>
-        /// Open connection to the device
+        /// Opens USB interface 1 and the interrupt endpoints used for L-key and G/M-key input.
         /// </summary>
+        /// <remarks>
+        /// Calling this method more than once is safe; subsequent calls return immediately while the endpoints are already
+        /// open. If the device is visible to LibUsbDotNet but cannot be opened, the thrown <see cref="Exception"/>
+        /// typically indicates that another application owns it or that libusbK is not installed on the composite parent
+        /// device for the keyboard path.
+        /// </remarks>
+        /// <exception cref="Exception">The device or one of the keyboard input endpoints could not be opened.</exception>
         public void OpenDevice()
         {
             if (IsAvailable)
@@ -99,9 +131,9 @@ namespace G19USB
                 {
                     throw new Exception("G19 device found but could not be opened. This may happen if:\n" +
                         "1. The device is already in use by another application\n" +
-                        "2. The WinUSB driver is not installed correctly on ALL interfaces\n" +
-                        "3. You need to reinstall the WinUSB driver using Zadig on the base device (not just interface 0)\n" +
-                        "4. Try selecting 'Options > List All Devices' in Zadig and install WinUSB on 'G19s Gaming Keyboard' (without interface suffix)");
+                        "2. The libusbK driver is not installed correctly on the composite parent device\n" +
+                        "3. You need to reinstall the libusbK driver using Zadig on the base device (not just interface 0)\n" +
+                        "4. Try selecting 'Options > List All Devices' in Zadig and install libusbK on 'G19s Gaming Keyboard' (without interface suffix)");
                 }
                 else
                 {
@@ -177,8 +209,14 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Start monitoring keyboard input
+        /// Starts long-running polling tasks for the L-key and G/M-key endpoints.
         /// </summary>
+        /// <remarks>
+        /// Call <see cref="OpenDevice"/> first. Repeated calls while monitoring is already active return immediately.
+        /// <see cref="IsMonitoring"/> tracks the last start or stop request, not verified polling task health. The
+        /// resulting <see cref="KeysChanged"/> callbacks are invoked on background polling threads.
+        /// </remarks>
+        /// <exception cref="InvalidOperationException">The keyboard endpoints are not open.</exception>
         public void StartMonitoring()
         {
             if (!IsAvailable)
@@ -199,8 +237,12 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Stop monitoring keyboard input
+        /// Requests the polling tasks to stop.
         /// </summary>
+        /// <remarks>
+        /// The method cancels the polling token, aborts any pending endpoint reads, and waits up to roughly two seconds
+        /// for the tasks to exit. It is safe to call this method more than once.
+        /// </remarks>
         public void StopMonitoring()
         {
             if (!IsMonitoring)
@@ -608,9 +650,16 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Set the state of the M-Key LEDs
+        /// Sets the illuminated M-key LEDs.
         /// </summary>
-        /// <param name="keys">M-key flags to illuminate</param>
+        /// <param name="keys">
+        /// Bitwise combination of <see cref="G19Keys.M1"/>, <see cref="G19Keys.M2"/>, <see cref="G19Keys.M3"/>, and
+        /// <see cref="G19Keys.MR"/>. Other flags are ignored.
+        /// </param>
+        /// <remarks>
+        /// This method controls LED state only; it does not change which bank the hardware reports through key events.
+        /// </remarks>
+        /// <exception cref="InvalidOperationException">The keyboard endpoints are not open.</exception>
         public void SetMKeyLEDs(G19Keys keys)
         {
             if (!IsAvailable)
@@ -646,8 +695,13 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Close the connection to the device
+        /// Stops monitoring and closes the keyboard endpoints.
         /// </summary>
+        /// <remarks>
+        /// If this <see cref="Keyboard"/> instance was initialized from <see cref="G19Device"/>, calling this method also
+        /// closes the shared LibUsbDotNet device handle. Prefer <see cref="G19Device.CloseDevice"/> when you obtained the
+        /// helper from the combined wrapper.
+        /// </remarks>
         public void CloseDevice()
         {
             StopMonitoring();
@@ -678,7 +732,7 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Dispose of resources
+        /// Stops monitoring and closes the keyboard transport.
         /// </summary>
         public void Dispose()
         {

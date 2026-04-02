@@ -6,15 +6,26 @@ using System.Runtime.InteropServices;
 namespace G19USB
 {
     /// <summary>
-    /// Helper utilities for working with the G19 device
+    /// Helper utilities for preparing LCD buffers and formatting key flags for the G19 protocol.
     /// </summary>
     public static class G19Helpers
     {
         /// <summary>
-        /// Convert a System.Drawing.Bitmap to RGB565 format for the G19 LCD
+        /// Converts a <see cref="Bitmap"/> into the raw RGB565 payload expected by the G19 LCD.
         /// </summary>
-        /// <param name="bitmap">Source bitmap (should be 320x240)</param>
-        /// <returns>Byte array in RGB565 format</returns>
+        /// <param name="bitmap">
+        /// Source bitmap. Non-320 x 240 inputs are redrawn to <see cref="G19Constants.LcdWidth"/> by
+        /// <see cref="G19Constants.LcdHeight"/> before conversion.
+        /// </param>
+        /// <returns>
+        /// Exactly <see cref="G19Constants.LcdDataSize"/> bytes of RGB565 pixel payload without the 512-byte
+        /// <see cref="G19Constants.LcdHeader"/>.
+        /// </returns>
+        /// <remarks>
+        /// Pixels are emitted in the device layout used by the G19 LCD. The returned buffer can be passed directly to
+        /// <see cref="IG19Device.UpdateLcd(byte[])"/> or <see cref="LCD.UpdateScreen(ReadOnlySpan{byte})"/>.
+        /// </remarks>
+        /// <exception cref="ArgumentNullException"><paramref name="bitmap"/> is <see langword="null"/>.</exception>
         public static byte[] ConvertBitmapToRGB565(Bitmap bitmap)
         {
             if (bitmap == null)
@@ -97,8 +108,12 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Create a solid color bitmap in RGB565 format
+        /// Creates a raw RGB565 LCD payload filled with one colour.
         /// </summary>
+        /// <param name="color">Colour to encode into every pixel.</param>
+        /// <returns>
+        /// Exactly <see cref="G19Constants.LcdDataSize"/> bytes of RGB565 pixel payload without the LCD header.
+        /// </returns>
         public static byte[] CreateSolidColor(Color color)
         {
             byte[] data = new byte[G19Constants.LcdDataSize];
@@ -124,8 +139,11 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Create a test pattern for the LCD
+        /// Creates a simple test-pattern frame for the LCD.
         /// </summary>
+        /// <returns>
+        /// Exactly <see cref="G19Constants.LcdDataSize"/> bytes of RGB565 pixel payload without the LCD header.
+        /// </returns>
         public static byte[] CreateTestPattern()
         {
             using (var bitmap = new Bitmap(G19Constants.LcdWidth, G19Constants.LcdHeight))
@@ -166,8 +184,12 @@ namespace G19USB
         }
 
         /// <summary>
-        /// Get a human-readable string for key combinations
+        /// Formats a set of <see cref="G19Keys"/> flags into a human-readable string.
         /// </summary>
+        /// <param name="keys">Flags to format.</param>
+        /// <returns>
+        /// <c>None</c> when no named flags are set; otherwise a <c> + </c>-separated list of enum names in declaration order.
+        /// </returns>
         public static string GetKeyString(G19Keys keys)
         {
             if (keys == G19Keys.None)
