@@ -2,7 +2,6 @@
 using LibUsbDotNet.Main;
 using System;
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -29,11 +28,12 @@ namespace G19USB
         // Reconnect attempts when writes fail (useful after sleep/resume)
         private const int DefaultReconnectAttempts = 3;
         private const int DefaultReconnectDelayMs = 500;
+        private const int OrderedWriteQueueCapacity = 2;
         private readonly byte[] _lcdBuffer = new byte[G19Constants.LcdFullSize];
         private readonly GCHandle _lcdBufferHandle;
         private int _lcdBufferInFlight;
         private readonly ArrayPool<byte> _framePool = ArrayPool<byte>.Shared;
-        private readonly BlockingCollection<PendingWrite> _writeQueue;
+        private readonly LcdWriteQueue<PendingWrite> _writeQueue;
         private readonly CancellationTokenSource _writeCts;
         private readonly Task _writeWorker;
         private bool _disposed;
@@ -61,7 +61,7 @@ namespace G19USB
         {
             _usbFinder = new UsbDeviceFinder(vendorId, productId);
             _lcdBufferHandle = GCHandle.Alloc(_lcdBuffer, GCHandleType.Pinned);
-            _writeQueue = new BlockingCollection<PendingWrite>(new ConcurrentQueue<PendingWrite>());
+            _writeQueue = new LcdWriteQueue<PendingWrite>(OrderedWriteQueueCapacity);
             _writeCts = new CancellationTokenSource();
             _writeWorker = Task.Factory.StartNew(
                 () => ProcessWriteQueue(_writeCts.Token), 
@@ -233,6 +233,75 @@ namespace G19USB
         }
 
         /// <summary>
+        /// Writes one complete header-plus-payload LCD frame without copying it into the LCD's
+        /// internal frame buffer. This call remains synchronous and does not return until the
+        /// worker has finished with the caller-owned array.
+        /// </summary>
+        /// <param name="lcdFrame">Exactly <see cref="G19Constants.LcdFullSize"/> bytes.</param>
+        /// <remarks>
+        /// The array must not be modified until this method returns. The complete frame must
+        /// contain the protocol header followed by the 153600-byte RGB565 payload.
+        /// </remarks>
+        public void UpdateScreenCompleteFrame(byte[] lcdFrame)
+        {
+            if (lcdFrame == null)
+                throw new ArgumentNullException(nameof(lcdFrame));
+
+            UpdateScreenAsync(lcdFrame, includesHeader: true).GetAwaiter().GetResult();
+        }
+
+        /// <summary>
+        /// Queues a latest-frame update. At most one not-yet-started frame is retained; a newer
+        /// call completes the older pending call with <see cref="LcdFrameSupersededException"/>.
+        /// </summary>
+        /// <param name="lcdData">Raw RGB565 payload or a complete frame, according to <paramref name="includesHeader"/>.</param>
+        /// <param name="includesHeader">Whether <paramref name="lcdData"/> includes the 512-byte protocol header.</param>
+        /// <remarks>
+        /// Raw payload memory is copied before this method returns. Array-backed complete-frame
+        /// memory is retained until the returned task completes, so callers must keep it alive and
+        /// unchanged until completion. Use the synchronous complete-frame method when every frame
+        /// must be delivered and caller-thread error reporting is required.
+        /// </remarks>
+        public ValueTask UpdateScreenLatestAsync(
+            ReadOnlyMemory<byte> lcdData,
+            bool includesHeader = false)
+        {
+            ThrowIfDisposed();
+
+            if (!IsAvailable)
+                throw new InvalidOperationException("Device must be opened before updating screen.");
+            if (lcdData.IsEmpty)
+                throw new ArgumentNullException(nameof(lcdData));
+
+            if (includesHeader)
+            {
+                if (lcdData.Length != G19Constants.LcdFullSize)
+                {
+                    throw new ArgumentException(
+                        $"LCD data must be exactly {G19Constants.LcdFullSize} bytes when the header is included.",
+                        nameof(lcdData));
+                }
+
+                return QueueFullFrameLatestAsync(lcdData);
+            }
+
+            if (lcdData.Length != G19Constants.LcdDataSize)
+            {
+                throw new ArgumentException(
+                    $"LCD data must be exactly {G19Constants.LcdDataSize} bytes (320x240 RGB565) when no header is supplied.",
+                    nameof(lcdData));
+            }
+
+            return QueueRawPixelsLatestAsync(lcdData.Span);
+        }
+
+        /// <summary>
+        /// Writes one complete frame through the bounded latest-frame path.
+        /// </summary>
+        public ValueTask UpdateScreenCompleteFrameLatestAsync(ReadOnlyMemory<byte> lcdFrame)
+            => UpdateScreenLatestAsync(lcdFrame, includesHeader: true);
+
+        /// <summary>
         /// Writes one LCD frame from raw RGB565 pixel data.
         /// </summary>
         /// <param name="lcdData">
@@ -317,53 +386,90 @@ namespace G19USB
 
         private ValueTask QueueRawPixelsAsync(ReadOnlySpan<byte> pixelData)
         {
-            byte[] targetBuffer;
-            bool returnToPool = false;
-            bool usesInternalBuffer = false;
+            var prepared = PrepareRawPixels(pixelData);
+            return EnqueueWrite(
+                prepared.Buffer,
+                0,
+                G19Constants.LcdFullSize,
+                prepared.ReturnToPool,
+                prepared.UsesInternalBuffer,
+                timeout: G19Constants.LcdUpdateTimeout,
+                latest: false);
+        }
 
+        private ValueTask QueueRawPixelsLatestAsync(ReadOnlySpan<byte> pixelData)
+        {
+            var prepared = PrepareRawPixels(pixelData);
+            return EnqueueWrite(
+                prepared.Buffer,
+                0,
+                G19Constants.LcdFullSize,
+                prepared.ReturnToPool,
+                prepared.UsesInternalBuffer,
+                timeout: G19Constants.LcdUpdateTimeout,
+                latest: true);
+        }
+
+        private (byte[] Buffer, bool ReturnToPool, bool UsesInternalBuffer) PrepareRawPixels(ReadOnlySpan<byte> pixelData)
+        {
             if (Interlocked.CompareExchange(ref _lcdBufferInFlight, 1, 0) == 0)
             {
                 pixelData.CopyTo(_lcdBuffer.AsSpan(G19Constants.LcdHeaderSize, G19Constants.LcdDataSize));
-                targetBuffer = _lcdBuffer;
-                usesInternalBuffer = true;
-            }
-            else
-            {
-                targetBuffer = _framePool.Rent(G19Constants.LcdFullSize);
-                Buffer.BlockCopy(G19Constants.LcdHeader, 0, targetBuffer, 0, G19Constants.LcdHeaderSize);
-                pixelData.CopyTo(targetBuffer.AsSpan(G19Constants.LcdHeaderSize, G19Constants.LcdDataSize));
-                returnToPool = true;
+                return (_lcdBuffer, ReturnToPool: false, UsesInternalBuffer: true);
             }
 
-            return EnqueueWrite(targetBuffer, 0, G19Constants.LcdFullSize, returnToPool, usesInternalBuffer, timeout: G19Constants.LcdUpdateTimeout);
+            byte[] targetBuffer = _framePool.Rent(G19Constants.LcdFullSize);
+            Buffer.BlockCopy(G19Constants.LcdHeader, 0, targetBuffer, 0, G19Constants.LcdHeaderSize);
+            pixelData.CopyTo(targetBuffer.AsSpan(G19Constants.LcdHeaderSize, G19Constants.LcdDataSize));
+            return (targetBuffer, ReturnToPool: true, UsesInternalBuffer: false);
         }
 
         private ValueTask QueueFullFrameAsync(ReadOnlyMemory<byte> fullFrame)
+            => QueueFullFrame(fullFrame, latest: false);
+
+        private ValueTask QueueFullFrameLatestAsync(ReadOnlyMemory<byte> fullFrame)
+            => QueueFullFrame(fullFrame, latest: true);
+
+        private ValueTask QueueFullFrame(ReadOnlyMemory<byte> fullFrame, bool latest)
         {
-            if (MemoryMarshal.TryGetArray(fullFrame, out ArraySegment<byte> segment) && segment.Array != null && segment.Count == G19Constants.LcdFullSize)
+            if (MemoryMarshal.TryGetArray(fullFrame, out ArraySegment<byte> segment)
+                && segment.Array != null
+                && segment.Count == G19Constants.LcdFullSize)
             {
-                return EnqueueWrite(segment.Array, segment.Offset, segment.Count, returnToPool: false, usesInternalBuffer: false, timeout: G19Constants.LcdUpdateTimeout);
+                return EnqueueWrite(
+                    segment.Array,
+                    segment.Offset,
+                    segment.Count,
+                    returnToPool: false,
+                    usesInternalBuffer: false,
+                    timeout: G19Constants.LcdUpdateTimeout,
+                    latest: latest);
             }
 
             byte[] buffer = _framePool.Rent(G19Constants.LcdFullSize);
             fullFrame.Span.CopyTo(buffer.AsSpan(0, G19Constants.LcdFullSize));
-            return EnqueueWrite(buffer, 0, G19Constants.LcdFullSize, returnToPool: true, usesInternalBuffer: false, timeout: G19Constants.LcdUpdateTimeout);
+            return EnqueueWrite(
+                buffer,
+                0,
+                G19Constants.LcdFullSize,
+                returnToPool: true,
+                usesInternalBuffer: false,
+                timeout: G19Constants.LcdUpdateTimeout,
+                latest: latest);
         }
 
-        private ValueTask EnqueueWrite(byte[] buffer, int offset, int length, bool returnToPool, bool usesInternalBuffer, int timeout)
+        private ValueTask EnqueueWrite(
+            byte[] buffer,
+            int offset,
+            int length,
+            bool returnToPool,
+            bool usesInternalBuffer,
+            int timeout,
+            bool latest)
         {
             if (_disposed)
             {
-                if (returnToPool)
-                {
-                    _framePool.Return(buffer);
-                }
-
-                if (usesInternalBuffer)
-                {
-                    Interlocked.Exchange(ref _lcdBufferInFlight, 0);
-                }
-
+                ReleaseBuffer(buffer, returnToPool, usesInternalBuffer);
                 throw new ObjectDisposedException(nameof(LCD));
             }
 
@@ -372,24 +478,39 @@ namespace G19USB
 
             try
             {
-                _writeQueue.Add(pending);
+                if (latest)
+                {
+                    _writeQueue.EnqueueLatest(
+                        pending,
+                        replaced => AbandonPendingWrite(replaced, new LcdFrameSupersededException()));
+                }
+                else
+                {
+                    _writeQueue.EnqueueOrdered(pending);
+                }
             }
-            catch (InvalidOperationException)
+            catch (ObjectDisposedException)
             {
-                if (returnToPool)
-                {
-                    _framePool.Return(buffer);
-                }
-
-                if (usesInternalBuffer)
-                {
-                    Interlocked.Exchange(ref _lcdBufferInFlight, 0);
-                }
-
-                throw new ObjectDisposedException(nameof(LCD));
+                AbandonPendingWrite(pending, new ObjectDisposedException(nameof(LCD)));
+                throw;
             }
 
             return pending.AsValueTask();
+        }
+
+        private void AbandonPendingWrite(PendingWrite pending, Exception exception)
+        {
+            pending.Complete(success: false, exception);
+            ReleaseBuffer(pending.Buffer, pending.ReturnToPool, pending.UsesInternalBuffer);
+        }
+
+        private void ReleaseBuffer(byte[] buffer, bool returnToPool, bool usesInternalBuffer)
+        {
+            if (returnToPool)
+                _framePool.Return(buffer);
+
+            if (usesInternalBuffer)
+                Interlocked.Exchange(ref _lcdBufferInFlight, 0);
         }
 
         /// <summary>
@@ -587,7 +708,7 @@ namespace G19USB
         {
             try
             {
-                foreach (PendingWrite pending in _writeQueue.GetConsumingEnumerable(token))
+                while (_writeQueue.TryTake(token, out PendingWrite? pending) && pending != null)
                 {
                     try
                     {
@@ -600,15 +721,7 @@ namespace G19USB
                     }
                     finally
                     {
-                        if (pending.ReturnToPool)
-                        {
-                            _framePool.Return(pending.Buffer);
-                        }
-
-                        if (pending.UsesInternalBuffer)
-                        {
-                            Interlocked.Exchange(ref _lcdBufferInFlight, 0);
-                        }
+                        ReleaseBuffer(pending.Buffer, pending.ReturnToPool, pending.UsesInternalBuffer);
                     }
                 }
             }
@@ -618,20 +731,8 @@ namespace G19USB
             }
             finally
             {
-                while (_writeQueue.TryTake(out PendingWrite? pending) && pending != null)
-                {
-                    pending.Complete(success: false, exception: new ObjectDisposedException(nameof(LCD)));
-
-                    if (pending.ReturnToPool)
-                    {
-                        _framePool.Return(pending.Buffer);
-                    }
-
-                    if (pending.UsesInternalBuffer)
-                    {
-                        Interlocked.Exchange(ref _lcdBufferInFlight, 0);
-                    }
-                }
+                foreach (PendingWrite pending in _writeQueue.Complete())
+                    AbandonPendingWrite(pending, new ObjectDisposedException(nameof(LCD)));
             }
         }
 
@@ -737,7 +838,9 @@ namespace G19USB
 
             _disposed = true;
 
-            _writeQueue.CompleteAdding();
+            foreach (PendingWrite pending in _writeQueue.Complete())
+                AbandonPendingWrite(pending, new ObjectDisposedException(nameof(LCD)));
+
             try
             {
                 _writeWorker.Wait();
@@ -747,9 +850,9 @@ namespace G19USB
                 // Worker cancelled during shutdown; safe to ignore.
             }
 
-            _writeQueue.Dispose();
             _writeCts.Cancel();
             _writeCts.Dispose();
+            _writeQueue.Dispose();
 
             CloseDevice();
 

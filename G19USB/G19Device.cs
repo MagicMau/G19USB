@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 
 namespace G19USB
 {
@@ -11,7 +12,7 @@ namespace G19USB
     /// properties expose the child helpers, but once <see cref="OpenDevice"/> succeeds they share the same
     /// LibUsbDotNet handle and should normally be opened and closed through this wrapper.
     /// </remarks>
-    public class G19Device : IG19Device
+    public class G19Device : IG19Device, ICompleteFrameG19Device, ILatestFrameG19Device
     {
         private bool _disposed;
         private LibUsbDotNet.UsbDevice? _sharedUsbDevice;
@@ -241,6 +242,21 @@ namespace G19USB
         /// <exception cref="ArgumentException"><paramref name="data"/> does not have a supported frame size.</exception>
         /// <exception cref="InvalidOperationException">The LCD endpoint is not open.</exception>
         public void UpdateLcd(byte[] data) => LCD.UpdateScreen(data);
+
+        /// <summary>
+        /// Sends a caller-built complete header-plus-payload LCD frame without the raw-payload copy.
+        /// </summary>
+        /// <param name="lcdFrame">Exactly <see cref="G19Constants.LcdFullSize"/> bytes.</param>
+        /// <remarks>The array must remain unchanged until this method returns.</remarks>
+        public void UpdateLcdCompleteFrame(byte[] lcdFrame) => LCD.UpdateScreenCompleteFrame(lcdFrame);
+
+        /// <summary>
+        /// Queues a raw payload or complete frame through the bounded latest-frame path.
+        /// </summary>
+        public ValueTask UpdateLcdLatestAsync(
+            ReadOnlyMemory<byte> lcdData,
+            bool includesHeader = false)
+            => LCD.UpdateScreenLatestAsync(lcdData, includesHeader);
 
         /// <summary>
         /// Sets the illuminated M-key LEDs.
